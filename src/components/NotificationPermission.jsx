@@ -1,151 +1,257 @@
 import { useState, useEffect } from "react";
 
-const TARGET_HOUR = 13;
-const TARGET_MINUTE = 51;
-const MESSAGE_TITLE = "Test Message";
-const MESSAGE_BODY = "have a great tine";
+const REMINDER_HOUR = 16;
+const REMINDER_MINUTE = 38;
 
-const CHECK_INTERVAL_MS = 20000;
+const NOTIFICATION_TITLE = "Test Message";
+const NOTIFICATION_BODY = "Have a great time!";
 
-const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent);
+const REMINDER_CHECK_INTERVAL = 20_000;
+const LAST_SENT_REMINDER_STORAGE_KEY = "lastSentReminderKey";
 
-const isStandalone = () =>
+const isIOSDevice = () =>
+  /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+const isRunningAsInstalledApp = () =>
   window.matchMedia("(display-mode: standalone)").matches ||
   window.navigator.standalone === true;
 
-const getPermission = () =>
-  typeof window !== "undefined" && "Notification" in window
-    ? Notification.permission
-    : "unsupported";
+const getNotificationPermission = () => {
+  if (typeof window === "undefined") return "unsupported";
 
-const getBlocker = () => {
-  if (typeof window === "undefined") return "Not running in a browser.";
-  if (!("Notification" in window))
+  if (!("Notification" in window)) return "unsupported";
+
+  return Notification.permission;
+};
+
+const getNotificationBlockerReason = () => {
+  if (typeof window === "undefined") {
+    return "Not running in a browser.";
+  }
+
+  if (!("Notification" in window)) {
     return "This browser does not support notifications.";
-  if (!("serviceWorker" in navigator))
+  }
+
+  if (!("serviceWorker" in navigator)) {
     return "This browser does not support Service Workers.";
-  if (isIos() && !isStandalone())
+  }
+
+  if (isIOSDevice() && !isRunningAsInstalledApp()) {
     return "On iPhone or iPad, add this app to the Home Screen first.";
+  }
+
   return null;
 };
-const getRegistration = async () => {
-  const registration =
-    (await navigator.serviceWorker.getRegistration()) ||
-    (await navigator.serviceWorker.register("/service-worker.js"));
-  await navigator.serviceWorker.ready;
-  return registration;
+
+const getServiceWorkerRegistration = async () => {
+  const existingRegistration =
+    await navigator.serviceWorker.getRegistration();
+
+  if (existingRegistration) {
+    return existingRegistration;
+  }
+
+  await navigator.serviceWorker.register("/service-worker.js");
+
+  return await navigator.serviceWorker.ready;
 };
 
-const pad = (n) => String(n).padStart(2, "0");
+const padWithZero = (number) =>String(number).padStart(2, "0");
 
-const formatTime = (hour, minute) =>
-  `${hour % 12 || 12}:${pad(minute)} ${hour >= 12 ? "PM" : "AM"}`;
+const formatReminderTime = (hour, minute) => {
+  const formattedHour = hour % 12 || 12;
+  const formattedMinute = padWithZero(minute);
+  const meridiem = hour >= 12 ? "PM" : "AM";
 
-const getFireKey = () =>
-  `${new Date().toDateString()}-${pad(TARGET_HOUR)}:${pad(TARGET_MINUTE)}`;
+  return `${formattedHour}:${formattedMinute} ${meridiem}`;
+};
 
-const readSent = () => {
+const createDailyReminderKey = () => {
+  const today = new Date().toDateString();
+  const reminderTime = `${padWithZero(REMINDER_HOUR)}:${padWithZero(
+    REMINDER_MINUTE
+  )}`;
+
+  return `${today}-${reminderTime}`;
+};
+
+const getLastSentReminderKey = () => {
   try {
-    return localStorage.getItem("lastSentKey");
+    return localStorage.getItem(LAST_SENT_REMINDER_STORAGE_KEY);
   } catch {
     return null;
   }
 };
 
-const writeSent = (key) => {
+const saveLastSentReminderKey = (reminderKey) => {
   try {
-    localStorage.setItem("lastSentKey", key);
+    localStorage.setItem(
+      LAST_SENT_REMINDER_STORAGE_KEY,
+      reminderKey
+    );
+  } catch {
+    //
+  }
+};
+
+const removeLastSentReminderKey = () => {
+  try {
+    localStorage.removeItem(LAST_SENT_REMINDER_STORAGE_KEY);
   } catch {
     //
   }
 };
 
 const NotificationPermission = () => {
-  const [permission, setPermission] = useState(getPermission);
-  const [status, setStatus] = useState("");
+  const [permission, setPermission] = useState(
+    getNotificationPermission
+  );
 
-  const requestPermission = async () => {
-    const blocker = getBlocker();
+  const [statusMessage, setStatusMessage] = useState("");
+  const blockerReason = getNotificationBlockerReason();
 
-    if(blocker){
-      setStatus(blocker);
+  const requestNotificationPermission = async () => {
+    const blockerReason = getNotificationBlockerReason();
+
+    if (blockerReason) {
+      setStatusMessage(blockerReason);
       return;
     }
 
-    const result = await Notification.requestPermission();
-    setPermission(result)
-    if(result !== "granted"){
-      setStatus("Permission denied. Enable it in browser Setting")
+    try {
+      const permissionResult =
+        await Notification.requestPermission();
+
+      setPermission(permissionResult);
+
+      if (permissionResult !== "granted") {
+        setStatusMessage(
+          "Permission denied. Enable notifications in your browser settings."
+        );
+        return;
+      }
+
+      setStatusMessage("Notifications enabled successfully.");
+    } catch {
+      setStatusMessage("Could not request notification permission.");
     }
   };
 
   useEffect(() => {
-    if (getBlocker()) return;
-    if (isIos() && !isStandalone()) return;
+    if (permission !== "granted") return;
 
-    if (Notification.permission === "default") {
-      Notification.requestPermission()
-        .then(setPermission)
-        .catch(() => {});
-    }
+    const blockerReason = getNotificationBlockerReason();
 
-    const check = async () => {
-      if (Notification.permission !== "granted") return;
+    if (blockerReason) return;
 
-      const now = new Date();
-      const target = new Date();
-      target.setHours(TARGET_HOUR, TARGET_MINUTE, 0, 0);
-      if (now < target) return;
+    const checkAndSendScheduledReminder = async () => {
+      const currentTime = new Date();
 
-      const key = getFireKey();
-      if (readSent() === key) return;
-      writeSent(key);
+      const scheduledReminderTime = new Date();
+
+      scheduledReminderTime.setHours(
+        REMINDER_HOUR,
+        REMINDER_MINUTE,
+        0,
+        0
+      );
+
+      if (currentTime < scheduledReminderTime) return;
+
+      const dailyReminderKey = createDailyReminderKey();
+
+      if (
+        getLastSentReminderKey() === dailyReminderKey
+      ) {
+        return;
+      }
 
       try {
-        const reg = await getRegistration();
-        await reg.showNotification(MESSAGE_TITLE, {
-          body: MESSAGE_BODY,
-          icon: "/icon-192.png",
-          badge: "/badge-72.png",
-          tag: `scheduled-reminder-${key}`,
-        });
+        const serviceWorkerRegistration =
+          await getServiceWorkerRegistration();
+
+        saveLastSentReminderKey(dailyReminderKey);
+
+        await serviceWorkerRegistration.showNotification(
+          NOTIFICATION_TITLE,
+          {
+            body: NOTIFICATION_BODY,
+            icon: "/icon-192.png",
+            badge: "/badge-72.png",
+            tag: `scheduled-reminder-${dailyReminderKey}`,
+          }
+        );
+
+        setStatusMessage(
+          `Reminder sent at ${currentTime.toLocaleTimeString()}.`
+        );
       } catch (error) {
-        try {
-          localStorage.removeItem("lastSentKey");
-        } catch {
-          //
-        }
-        setStatus(`Could not display the notification: ${error.message}`);
+        removeLastSentReminderKey();
+
+        setStatusMessage(
+          `Could not display the notification: ${error.message}`
+        );
       }
     };
 
-    check();
-    const id = setInterval(check, CHECK_INTERVAL_MS);
-    const onVisible = () => document.visibilityState === "visible" && check();
-    document.addEventListener("visibilitychange", onVisible);
+    checkAndSendScheduledReminder();
+
+    const intervalId = setInterval(
+      checkAndSendScheduledReminder,
+      REMINDER_CHECK_INTERVAL
+    );
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        checkAndSendScheduledReminder();
+      }
+    };
+
+    document.addEventListener(
+      "visibilitychange",
+      handleVisibilityChange
+    );
 
     return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(intervalId);
+
+      document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange
+      );
     };
-  }, []);
+  }, [permission]);
 
   return (
     <div>
       <h1>Reminder</h1>
+
       <p>
         A notification will appear automatically at{" "}
-        {formatTime(TARGET_HOUR, TARGET_MINUTE)} every day.
+        {formatReminderTime(
+          REMINDER_HOUR,
+          REMINDER_MINUTE
+        )}{" "}
+        every day.
       </p>
 
       {permission === "default" && (
-        <button type="button" onClick={requestPermission}>
-          Allow notifications (one-time)
+        <button
+          type="button"
+          onClick={requestNotificationPermission}
+        >
+          Allow notifications
         </button>
       )}
 
       <p>Permission: {permission}</p>
-      {status && <p role="status">{status}</p>}
+
+      {(blockerReason || statusMessage) && (
+        <p role="status">
+          {blockerReason || statusMessage}
+        </p>
+      )}
     </div>
   );
 };
